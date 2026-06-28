@@ -122,7 +122,9 @@ if "layers" not in st.session_state:
     ]
 
 # Setup High-Level Architecture Workspace Tabs (Fixes Scroll/Bottom Stack Bugs)
-designer_tab, analytics_tab = st.tabs(["📐 1. Layer Stack Designer", "📊 2. Physics & Attenuation Analytics"])
+designer_tab, analytics_tab, stability_tab = st.tabs(["📐 1. Layer Stack Designer", 
+                                       "📊 2. Physics & Attenuation Analytics", 
+                                       "🛡️ 3. Layer Stability & Absorption Mapping"])
 
 energies = np.logspace(4, 8, 1000) # 10 keV to 100 MeV
 
@@ -300,3 +302,106 @@ with analytics_tab:
             ax2.set_ylim(-5, 105)
             st.pyplot(fig2)
             plt.close(fig2) # Explicitly closes figure to prevent cache leak crashes
+
+# ==========================================
+#     TAB 3: LAYER STABILITY & BIAS MAPPING
+# ==========================================
+with stability_tab:
+    st.header("Layer-by-Layer Absorption & Radiation Stability Analysis")
+    st.write("Evaluate which sections of your heterojunction absorb the highest concentration of photons. Layers experiencing high absorption profiles are at the greatest risk for radiation-induced defects or thermal degradation.")
+
+    if not st.session_state.layers:
+        st.warning("Please configure your material layers in Tab 1 to generate stability profiles.")
+    else:
+        # 1. Capture the exact probe energy from the user's workflow
+        # (Re-using or overriding the target_energy slider variable)
+        st.markdown(f"### Current Structural Analysis at **{target_energy} keV**")
+        
+        # 2. Sequential Tracking Math
+        layer_names_display = []
+        layer_absorptions = []
+        
+        # We start with 100% of the beam entering the first layer
+        current_transmission_fraction = 1.0 
+        
+        for idx, layer in enumerate(st.session_state.layers):
+            if layer["type"] == "Predefined":
+                comp = db["predefined_compounds"][layer["name"]]["composition"]
+                rho = db["predefined_compounds"][layer["name"]]["density"]
+            else:
+                comp = layer["custom_comp"]
+                rho = layer["custom_rho"]
+                
+            z_eff, _, mu_profile, _, _, _, _ = get_material_metrics(comp, rho)
+            thickness_cm = layer["thickness_um"] * 1e-4
+            
+            # Find closest index for our keV target
+            close_idx = (np.abs((energies / 1e3) - target_energy)).argmin()
+            mu_at_energy = mu_profile[close_idx]
+            
+            # Compute step boundaries
+            intensity_entering = current_transmission_fraction
+            intensity_exiting = intensity_entering * np.exp(-mu_at_energy * thickness_cm)
+            
+            # Absolute absorption in this slice relative to I_0
+            absolute_layer_absorption = (intensity_entering - intensity_exiting) * 100
+            
+            layer_names_display.append(f"L{idx+1}: {layer['name']}\n({layer['thickness_um']} μm)")
+            layer_absorptions.append(absolute_layer_absorption)
+            
+            # Cascade the remaining beam energy to the next layer down
+            current_transmission_fraction = intensity_exiting
+
+        # 3. Render the 2D Schematic Stack Map
+        col_map, col_metrics = st.columns([2, 1])
+        
+        with col_map:
+            fig3, ax3 = plt.subplots(figsize=(10, 4.5))
+            
+            # Draw a horizontal stack representing the device cross-section
+            y_pos = np.arange(len(layer_names_display))
+            
+            # Color map scaling from cool (low absorption) to dangerous hot red (high absorption)
+            colors = plt.cm.get_cmap('YlOrRd')(np.array(layer_absorptions) / max(max(layer_absorptions), 1.0))
+            
+            bars = ax3.barh(y_pos, layer_absorptions, color=colors, edgecolor='#374151', height=0.6)
+            
+            # Labeling tweaks
+            ax3.set_yticks(y_pos)
+            ax3.set_yticklabels(layer_names_display, fontsize=10, fontweight='bold', color='#ffffff')
+            ax3.set_xlabel(f"Absolute Percentage of Original Beam Absorbed Inside Layer (%)", fontsize=11, color='#ffffff')
+            ax3.set_title(f"2D Microstructural Radiation Load Profile ({target_energy} keV Target)", fontsize=13, fontweight='bold', color='#00f3ff')
+            ax3.grid(axis='x', linestyle='--', alpha=0.2)
+            ax3.set_xlim(0, max(max(layer_absorptions) * 1.15, 10))
+            
+            # Add value tags directly onto the bars
+            for bar, val in zip(bars, layer_absorptions):
+                ax3.text(bar.get_width() + 0.3, bar.get_y() + bar.get_height()/2, 
+                         f"{val:.3f}%", 
+                         va='center', ha='left', fontsize=10, fontweight='bold', color='#ffffff')
+            
+            # Stylize plot background to fit dark mode perfectly
+            fig3.patch.set_facecolor('#0b0f19')
+            ax3.set_facecolor('#111827')
+            ax3.spines['bottom'].set_color('#374151')
+            ax3.spines['left'].set_color('#374151')
+            ax3.spines['top'].set_visible(False)
+            ax3.spines['right'].set_visible(False)
+            ax3.tick_params(colors='#ffffff')
+            
+            st.pyplot(fig3)
+            plt.close(fig3)
+
+        with col_metrics:
+            st.subheader("⚠️ Stability Assessment")
+            
+            highest_absorbed_idx = np.argmax(layer_absorptions)
+            highest_absorbed_val = layer_absorptions[highest_absorbed_idx]
+            highest_layer_name = st.session_state.layers[highest_absorbed_idx]["name"]
+            
+            if highest_absorbed_val > 50.0:
+                st.error(f"**Critical Stress Alert:** The primary radiation load is sinking directly into **{highest_layer_name}** ({highest_absorbed_val:.2f}% total beam loss). Watch out for operational phase degradation or secondary ion displacement traps here.")
+            elif highest_absorbed_val > 5.0:
+                st.warning(f"**Moderate Stress Warning:** **{highest_layer_name}** acts as the primary beam block here ({highest_absorbed_val:.2f}% absorption). Ensure encapsulants can handle localized thermal dissipation.")
+            else:
+                st.success("**Low Radiation Burden:** Energy dispersion is highly distributed. No single layer is bearing a critical load bottleneck at this specific keV signature.")
